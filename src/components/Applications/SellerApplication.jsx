@@ -12,12 +12,16 @@ import {
 import useAPI from "../../hooks/useAPI";
 import { toast } from "react-hot-toast";
 import useRegions from "../../hooks/useRegions";
+import { useNavigate } from "react-router-dom";
+import useScrollToTop from "../../hooks/useScrollToTop";
 
 export default function SellerApplication() {
+	useScrollToTop(true, 200); // Add 200ms delay to ensure content is rendered
 	const { currentUser } = useAuth();
 	const { apiCall, loading } = useAPI();
 	const [districts, setDistricts] = useState([]);
 	const regions = useRegions();
+	const navigate = useNavigate();
 	const [formData, setFormData] = useState({
 		farmName: "",
 		farmType: "",
@@ -73,6 +77,8 @@ export default function SellerApplication() {
 			// If region changes, clear the district selection
 			if (name === "region") {
 				newFormData.district = "";
+			} else if (name === "farmPhotos") {
+				newFormData.farmPhotos = value.split(",").map((img) => img.trim());
 			}
 			return newFormData;
 		});
@@ -154,7 +160,7 @@ export default function SellerApplication() {
 				formData,
 				operationalArea: {
 					region: formData.region,
-					district: formData.district
+					district: formData.district,
 				},
 				applicantId: currentUser?.DBUser?._id,
 				applicantName: currentUser?.FirebaseUser?.displayName,
@@ -164,11 +170,20 @@ export default function SellerApplication() {
 				status: "pending",
 			};
 
-			await apiCall("/applications", "POST", applicationData);
+			const response = await apiCall("/applications", "POST", applicationData);
 
-			toast.success(
-				"Seller application submitted successfully! We'll review your application and get back to you within 5-7 business days."
-			);
+			// Check success field in response
+			if (response?.success) {
+				toast.success(
+					response.message ||
+						"Seller application submitted successfully! We'll review your application and get back to you within 5-7 business days."
+				);
+			} else {
+				toast.success(
+					"Seller application submitted successfully! We'll review your application and get back to you within 5-7 business days."
+				);
+			}
+			navigate("/");
 
 			// Reset form
 			setFormData({
@@ -192,7 +207,12 @@ export default function SellerApplication() {
 			});
 		} catch (error) {
 			console.error("Error submitting application:", error);
-			toast.error(error.response.data.message || "Failed to submit application. Please try again.");
+			// Handle error response with success field
+			const errorMessage =
+				error?.response?.data?.message ||
+				error?.message ||
+				"Failed to submit application. Please try again.";
+			toast.error(errorMessage);
 		}
 	};
 

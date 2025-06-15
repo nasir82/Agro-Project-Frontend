@@ -11,12 +11,16 @@ import {
 import useAPI from "../../hooks/useAPI";
 import { toast } from "react-hot-toast";
 import useRegions from "../../hooks/useRegions";
+import { useNavigate } from "react-router-dom";
+import useScrollToTop from "../../hooks/useScrollToTop";
 
 export default function AgentApplication() {
+	useScrollToTop(false); // Use instant scroll for immediate effect
 	const { currentUser } = useAuth();
 	const { apiCall, loading } = useAPI();
 	const allRegions = useRegions();
 	const [districts, setDistricts] = useState([]);
+	const navigate = useNavigate();
 
 	const [formData, setFormData] = useState({
 		businessName: "",
@@ -65,6 +69,8 @@ export default function AgentApplication() {
 			const newFormData = { ...prev, [name]: value };
 			if (name === "region") {
 				newFormData.district = "";
+			} else if (name === "warehouseImages") {
+				newFormData.warehouseImages = value.split(",").map((img) => img.trim());
 			}
 			return newFormData;
 		});
@@ -134,7 +140,7 @@ export default function AgentApplication() {
 				formData,
 				operationalArea: {
 					region: formData.region,
-					district: formData.district
+					district: formData.district,
 				},
 				applicantId: currentUser?.DBUser?._id,
 				applicantName: currentUser?.FirebaseUser?.displayName,
@@ -149,7 +155,7 @@ export default function AgentApplication() {
 			toast.success(
 				"Agent application submitted successfully! We'll review your application and get back to you within 5-7 business days."
 			);
-
+			navigate("/");
 			// Reset form
 			setFormData({
 				businessName: "",
@@ -168,7 +174,10 @@ export default function AgentApplication() {
 			});
 		} catch (error) {
 			console.error("Error submitting application:", error);
-			toast.error(error.response.data.message || "Failed to submit application. Please try again.");
+			toast.error(
+				error.response.data.message ||
+					"Failed to submit application. Please try again."
+			);
 		}
 	};
 

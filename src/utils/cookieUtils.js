@@ -47,7 +47,6 @@ export const areCookiesEnabled = () => {
 		document.cookie = "cookietest=1; expires=Thu, 01 Jan 1970 00:00:00 GMT";
 		return result;
 	} catch (e) {
-        console.log("Cookies are not enabled in this browser.", e.message);
 		return false;
 	}
 };

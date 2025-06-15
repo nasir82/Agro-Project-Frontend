@@ -8,13 +8,15 @@ import {
 	FacebookAuthProvider,
 	signInWithPopup,
 	updateProfile,
+	updatePassword,
+	reauthenticateWithCredential,
+	EmailAuthProvider,
 } from "firebase/auth";
 import { auth } from "../firebase/firebase.config";
 import axios from "axios";
 import toast from "react-hot-toast";
 import { areCookiesEnabled } from "../utils/cookieUtils";
 import authService from "../services/authService";
-import cartService from "../services/cartService";
 
 export const AuthContext = createContext();
 
@@ -93,7 +95,8 @@ export default function AuthProvider({ children }) {
 		password,
 		name,
 		profileImage,
-		address
+		address,
+		fullAddress
 	) => {
 		try {
 			const userCredential = await createUserWithEmailAndPassword(
@@ -118,7 +121,8 @@ export default function AuthProvider({ children }) {
 				password,
 				"email-pass",
 				"consumer",
-				address
+				address,
+				fullAddress
 			);
 
 			// Return user info
@@ -255,7 +259,8 @@ export default function AuthProvider({ children }) {
 		password,
 		provider,
 		role = "consumer",
-		address = null
+		address = null,
+		fullAddress = null
 	) => {
 		try {
 			const { data } = await axios.post(
@@ -268,6 +273,7 @@ export default function AuthProvider({ children }) {
 					role,
 					phoneNumber: "",
 					address: address,
+					fullAddress: fullAddress,
 					firebaseUID: user.uid,
 					profilePicture:
 						user.photoURL || "https://i.ibb.co/MBtjqXQ/no-avatar.gif",
@@ -286,6 +292,61 @@ export default function AuthProvider({ children }) {
 		}
 	};
 
+	// Check if user is Admin
+	const isAdmin = () => currentRole === "admin";
+
+	// Check if user is Agent
+	const isAgent = () => currentRole === "agent";
+
+	// Check if user is Seller
+	const isSeller = () => currentRole === "seller";
+
+	// Check if user is Consumer
+	const isConsumer = () => currentRole === "consumer";
+
+	// Check if user is authenticated with valid token
+	const isAuthenticated = () => {
+		return currentUser?.FirebaseUser && authService.hasValidToken();
+	};
+
+	// Change password
+	const changePassword = async (currentPassword, newPassword) => {
+		try {
+			const user = currentUser?.FirebaseUser;
+			if (!user || !user.email) {
+				throw new Error("User not authenticated");
+			}
+
+			// Re-authenticate user with current password
+			const credential = EmailAuthProvider.credential(
+				user.email,
+				currentPassword
+			);
+			await reauthenticateWithCredential(user, credential);
+
+			// Update password in Firebase
+			await updatePassword(user, newPassword);
+
+			// Update password in database
+			await axios.patch(
+				`${apiBaseUrl}/users/updatePassword/${user.email}`,
+				{ currentPassword, newPassword },
+				{ withCredentials: true }
+			);
+
+			toast.success("Password updated successfully");
+			return true;
+		} catch (error) {
+			console.error("Error changing password:", error);
+
+			toast.error(
+				error?.code
+					? `${error.code}: ${error.message}`
+					: "Failed to update password"
+			);
+			throw error;
+		}
+	};
 
 	// Update user profile
 	const updateUserProfile = async (displayName = null, photoURL = null) => {
@@ -394,13 +455,6 @@ export default function AuthProvider({ children }) {
 					// Get DB user info and wait for it
 					const role = await getDBUser(user.email);
 					if (role) setCurrentRole(role);
-
-					// Merge cart from localStorage to database when user logs in
-					try {
-						await cartService.mergeAndTransferCart(user.email);
-					} catch (error) {
-						console.error("Error merging cart on login:", error);
-					}
 				} catch (error) {
 					console.error("Error during auth state change:", error);
 				}
@@ -428,7 +482,13 @@ export default function AuthProvider({ children }) {
 		loginWithGoogle,
 		loginWithFacebook,
 		logout,
+		changePassword,
 		updateUserProfile,
+		isAdmin,
+		isAgent,
+		isSeller,
+		isConsumer,
+		isAuthenticated,
 		getDBUser,
 	};
 

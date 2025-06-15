@@ -1,220 +1,421 @@
-import { useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../contexts/AuthContext";
-import {
-	addToCartAsync,
-	updateCartItemQuantityAsync,
-	removeFromCartAsync,
-	clearCartAsync,
-	loadCartFromDB,
-	loadCartFromLocalStorage,
-	mergeCartOnLogin,
-	selectCartItems,
-	selectCartTotalItems,
-	selectCartSubtotal,
-	selectCartDeliveryCharge,
-	selectCartTotal,
-	selectCartSyncStatus,
-	selectCartSyncError,
-	selectCartLastSync,
-} from "../redux/slices/cartSlice";
 import toast from "react-hot-toast";
+import {
+	getCartFromDB,
+	addItemToDB,
+	updateCartItemInDB,
+	removeCartItemFromDB,
+	clearCartInDB,
+	addMultipleItemsToCart,
+	batchUpdateCart,
+	previewCartMerge,
+} from "../services/cartService";
 
-export const useCart = () => {
-	const dispatch = useDispatch();
+/**
+ * Industry Standard Cart Hook
+ * Backend as Single Source of Truth
+ * Minimal client-side state for performance
+ */
+const useCart = () => {
 	const { currentUser } = useAuth();
-	const cartItems = useSelector(selectCartItems);
-	const totalItems = useSelector(selectCartTotalItems);
-	const subtotal = useSelector(selectCartSubtotal);
-	const deliveryCharge = useSelector(selectCartDeliveryCharge);
-	const total = useSelector(selectCartTotal);
-	const syncStatus = useSelector(selectCartSyncStatus);
-	const syncError = useSelector(selectCartSyncError);
-	const lastSync = useSelector(selectCartLastSync);
+	const user = currentUser?.FirebaseUser;
 
-	const isAuthenticated = !!currentUser?.FirebaseUser;
-	const userEmail = currentUser?.FirebaseUser?.email;
+	// Minimal client state - only for UI performance
+	const [cartItems, setCartItems] = useState([]);
+	const [loading, setLoading] = useState(false);
+	const [error, setError] = useState(null);
+	const [totalAmount, setTotalAmount] = useState(0);
+	const [totalItems, setTotalItems] = useState(0);
 
-	// Load cart on component mount and auth state changes
-	useEffect(() => {
-		if (isAuthenticated && userEmail) {
-			// Check for checkout intent after login
-			const checkoutIntent = localStorage.getItem("checkoutIntent");
-			if (checkoutIntent) {
-				try {
-					const intent = JSON.parse(checkoutIntent);
-					// Check if the intent is still valid (less than 1 hour old)
-					const intentAge =
-						new Date().getTime() - new Date(intent.timestamp).getTime();
-					if (intentAge < 60 * 60 * 1000) {
-						// 1 hour in milliseconds
-						// Navigate to checkout after cart is loaded
-						setTimeout(() => {
-							window.location.href = "/checkout";
-						}, 1000); // Wait 1 second for cart to load
-						localStorage.removeItem("checkoutIntent");
-					} else {
-						// Remove expired checkout intent
-						localStorage.removeItem("checkoutIntent");
-					}
-				} catch (error) {
-					console.error("Error processing checkout intent:", error);
-					localStorage.removeItem("checkoutIntent");
+	// Calculate totals from items
+	const calculateTotals = useCallback((items) => {
+		const itemCount = items.reduce((sum, item) => sum + item.quantity, 0);
+		const amount = items.reduce(
+			(sum, item) => sum + item.price * item.quantity,
+			0
+		);
+
+		setTotalItems(itemCount);
+		setTotalAmount(amount);
+
+		return { totalItems: itemCount, totalAmount: amount };
+	}, []);
+
+	// Load cart from backend (single source of truth)
+	const loadCart = useCallback(async () => {
+		if (!user?.email) {
+			setCartItems([]);
+			setTotalItems(0);
+			setTotalAmount(0);
+			return;
+		}
+
+		setLoading(true);
+		setError(null);
+
+		try {
+			const response = await getCartFromDB(user.email);
+
+			// Handle backend response format: { success: true, cart: { items: [...] } }
+			const backendItems = response.cart?.items || response.data?.items || [];
+
+			// Map backend format to frontend format
+			const items = backendItems.map((item) => ({
+				productId: item._id,
+				name: item.title,
+				price: item.price,
+				quantity: item.quantity,
+				image: item.image,
+				unit: item.unit,
+				minimumOrderQuantity: item.minimumOrderQuantity,
+				sellerId: item?.seller?.id || "unknown_seller",
+				sellerName: item?.seller?.name || "Unknown Seller",
+				category: item.category,
+			}));
+
+			setCartItems(items);
+
+			// Use backend totals if available, otherwise calculate
+			if (response.cart?.totalItems && response.cart?.totalAmount) {
+				setTotalItems(response.cart.totalItems);
+				setTotalAmount(response.cart.totalAmount);
+			} else {
+				const calculated = calculateTotals(items);
+				// console.log("useCart: Calculated totals", calculated);
+			}
+		} catch (err) {
+			setError(err.message || "Failed to load cart");
+			setCartItems([]);
+			setTotalItems(0);
+			setTotalAmount(0);
+		} finally {
+			setLoading(false);
+		}
+	}, [user?.email, calculateTotals]);
+
+	// Add single item to cart
+	const addItem = useCallback(
+		async (product, quantity = 1) => {
+			if (!user?.email) {
+				toast.error("Please login to add items to cart");
+				return false;
+			}
+
+			if (!product || !product._id) {
+				toast.error("Invalid product data");
+				return false;
+			}
+
+			if (quantity <= 0) {
+				toast.error("Quantity must be greater than 0");
+				return false;
+			}
+
+			setLoading(true);
+			setError(null);
+
+			try {
+				// Send data in backend expected format
+				const cartItem = {
+					_id: product._id,
+					title: product.name || product.title,
+					price: product.price,
+					quantity: quantity,
+					image: product.image,
+					unit: product.unit,
+					minimumOrderQuantity: product.minimumOrderQuantity || 1,
+					category: product.category,
+					seller: {
+						id: product?.seller?.id || "unknown_seller",
+						name: product?.seller?.name || "Unknown Seller",
+					},
+				};
+
+				await addItemToDB(user.email, cartItem);
+
+				// Reload cart from backend to ensure consistency
+				await loadCart();
+
+				toast.success(`${product.name || product.title} added to cart`);
+				return true;
+			} catch (err) {
+				const errorMessage = err.message || "Failed to add item to cart";
+				setError(errorMessage);
+				toast.error(errorMessage);
+				return false;
+			} finally {
+				setLoading(false);
+			}
+		},
+		[user?.email, loadCart]
+	);
+
+	// Add multiple items to cart
+	const addMultipleItems = useCallback(
+		async (items) => {
+			if (!user?.email) {
+				toast.error("Please login to add items to cart");
+				return false;
+			}
+
+			if (!Array.isArray(items) || items.length === 0) {
+				toast.error("No items provided");
+				return false;
+			}
+
+			// Validate and transform items to backend format
+			const backendItems = [];
+			for (const item of items) {
+				if (
+					!item.productId ||
+					!item.name ||
+					!item.price ||
+					item.quantity <= 0
+				) {
+					toast.error("Invalid item data provided");
+					return false;
 				}
-			}
 
-			// User is authenticated - load from database and merge with localStorage if needed
-			dispatch(mergeCartOnLogin(userEmail))
-				.unwrap()
-				.catch((error) => {
-					console.error("Error merging cart on login:", error);
-					toast.error("Failed to load your cart. Please try again.");
+				// Transform to backend format
+				backendItems.push({
+					_id: item.productId,
+					title: item.name,
+					price: item.price,
+					quantity: item.quantity,
+					image: item.image,
+					unit: item.unit,
+					minimumOrderQuantity: item.minimumOrderQuantity || 1,
+					category: item.category,
+					seller: {
+						id: item?.seller?.id || "unknown_seller",
+						name: item?.seller?.name || "Unknown Seller",
+					},
 				});
-		} else {
-			// User is not authenticated - load from localStorage
-			dispatch(loadCartFromLocalStorage())
-				.unwrap()
-				.catch((error) => {
-					console.error("Error loading cart from localStorage:", error);
-					toast.error("Failed to load your cart. Please try again.");
-				});
-		}
-	}, [isAuthenticated, userEmail, dispatch]);
-
-	// Enhanced add to cart function
-	const addItemToCart = async (product, quantity = 1) => {
-		try {
-			const result = await dispatch(
-				addToCartAsync({
-					product: { ...product, quantity },
-					email: userEmail,
-					isAuthenticated,
-				})
-			).unwrap();
-
-			if (result) {
-				toast.success(`${product.title} added to cart`);
 			}
-		} catch (error) {
-			console.error("Error adding item to cart:", error);
-			toast.error(error || "Failed to add item to cart");
-		}
-	};
 
-	// Enhanced update quantity function
-	const updateItemQuantity = async (itemId, quantity) => {
-		try {
-			const result = await dispatch(
-				updateCartItemQuantityAsync({
-					itemId,
-					quantity,
-					email: userEmail,
-					isAuthenticated,
-				})
-			).unwrap();
+			setLoading(true);
+			setError(null);
 
-			if (result) {
-				toast.success("Cart updated");
+			try {
+				await addMultipleItemsToCart(user.email, backendItems);
+
+				// Reload cart from backend to ensure consistency
+				await loadCart();
+
+				toast.success(`${items.length} items added to cart`);
+				return true;
+			} catch (err) {
+				const errorMessage = err.message || "Failed to add items to cart";
+				setError(errorMessage);
+				toast.error(errorMessage);
+				return false;
+			} finally {
+				setLoading(false);
 			}
-		} catch (error) {
-			console.error("Error updating item quantity:", error);
-			toast.error(error || "Failed to update item quantity");
-		}
-	};
+		},
+		[user?.email, loadCart]
+	);
 
-	// Enhanced remove from cart function
-	const removeItemFromCart = async (itemId) => {
-		try {
-			const result = await dispatch(
-				removeFromCartAsync({
-					itemId,
-					email: userEmail,
-					isAuthenticated,
-				})
-			).unwrap();
+	// Update item quantity
+	const updateItem = useCallback(
+		async (productId, quantity) => {
+			if (!user?.email) {
+				toast.error("Please login to update cart");
+				return false;
+			}
 
-			if (result) {
+			if (quantity <= 0) {
+				toast.error("Quantity must be greater than 0");
+				return false;
+			}
+
+			setLoading(true);
+			setError(null);
+
+			try {
+				// Backend expects _id field for product identification
+				await updateCartItemInDB(user.email, productId, quantity);
+
+				// Reload cart from backend to ensure consistency
+				await loadCart();
+
+				toast.success("Cart updated successfully");
+				return true;
+			} catch (err) {
+				const errorMessage = err.message || "Failed to update cart";
+				setError(errorMessage);
+				toast.error(errorMessage);
+				return false;
+			} finally {
+				setLoading(false);
+			}
+		},
+		[user?.email, loadCart]
+	);
+
+	// Remove item from cart
+	const removeItem = useCallback(
+		async (productId) => {
+			if (!user?.email) {
+				toast.error("Please login to remove items");
+				return false;
+			}
+
+			setLoading(true);
+			setError(null);
+
+			try {
+				// Backend expects _id field for product identification
+				await removeCartItemFromDB(user.email, productId);
+
+				// Reload cart from backend to ensure consistency
+				await loadCart();
+
 				toast.success("Item removed from cart");
+				return true;
+			} catch (err) {
+				const errorMessage = err.message || "Failed to remove item";
+				setError(errorMessage);
+				toast.error(errorMessage);
+				return false;
+			} finally {
+				setLoading(false);
 			}
-		} catch (error) {
-			console.error("Error removing item from cart:", error);
-			toast.error(error || "Failed to remove item from cart");
-		}
-	};
+		},
+		[user?.email, loadCart]
+	);
 
-	// Enhanced clear cart function
-	const clearCartItems = async () => {
+	// Clear entire cart
+	const clearCart = useCallback(async () => {
+		if (!user?.email) {
+			toast.error("Please login to clear cart");
+			return false;
+		}
+
+		setLoading(true);
+		setError(null);
+
 		try {
-			const result = await dispatch(
-				clearCartAsync({
-					email: userEmail,
-					isAuthenticated,
-				})
-			).unwrap();
+			await clearCartInDB(user.email);
 
-			if (result) {
-				toast.success("Cart cleared");
+			// Update local state immediately
+			setCartItems([]);
+			setTotalItems(0);
+			setTotalAmount(0);
+
+			toast.success("Cart cleared successfully");
+			return true;
+		} catch (err) {
+			const errorMessage = err.message || "Failed to clear cart";
+			setError(errorMessage);
+			toast.error(errorMessage);
+			return false;
+		} finally {
+			setLoading(false);
+		}
+	}, [user?.email]);
+
+	// Batch update operations
+	const batchUpdate = useCallback(
+		async (operations) => {
+			if (!user?.email) {
+				throw new Error("User not authenticated");
 			}
-		} catch (error) {
-			console.error("Error clearing cart:", error);
-			toast.error(error || "Failed to clear cart");
-		}
-	};
 
-	// Check if product is in cart
-	const isInCart = (productId) => {
-		return cartItems.some((item) => item._id === productId);
-	};
+			setLoading(true);
+			setError(null);
 
-	// Get item quantity in cart
-	const getItemQuantity = (productId) => {
-		const item = cartItems.find((item) => item._id === productId);
-		return item ? item.quantity : 0;
-	};
+			try {
+				// Use the batch update service function
+				await batchUpdateCart(user.email, operations);
 
-	// Redirect to login for checkout if not authenticated
-	const proceedToCheckout = (navigate) => {
-		if (!isAuthenticated) {
-			toast.error("Please login to proceed with checkout");
-			navigate("/login", { state: { from: "/checkout" } });
-			return false;
-		}
+				// Reload cart after all operations
+				await loadCart();
+				return true;
+			} catch (error) {
+				console.error("Batch update error:", error);
+				setError(error.message || "Failed to update cart");
+				throw error;
+			} finally {
+				setLoading(false);
+			}
+		},
+		[user?.email, loadCart]
+	);
 
-		if (cartItems.length === 0) {
-			toast.error("Your cart is empty");
-			return false;
-		}
+	// Preview merge items with cart (for UI preview)
+	const previewMergeItems = useCallback(
+		async (newItems) => {
+			if (!user?.email) {
+				return { success: false, error: "Please login first" };
+			}
 
-		if (syncStatus === "error") {
-			toast.error("There was an error syncing your cart. Please try again.");
-			return false;
-		}
+			if (!Array.isArray(newItems) || newItems.length === 0) {
+				return { success: false, error: "No items provided" };
+			}
 
-		navigate("/checkout");
-		return true;
-	};
+			try {
+				const response = await previewCartMerge(user.email, newItems);
+				return {
+					success: true,
+					data: response.data,
+				};
+			} catch (err) {
+				return {
+					success: false,
+					error: err.message || "Failed to preview merge",
+				};
+			}
+		},
+		[user?.email]
+	);
+
+	// Get item quantity by product ID
+	const getItemQuantity = useCallback(
+		(productId) => {
+			const item = cartItems.find((item) => item.productId === productId);
+			return item ? item.quantity : 0;
+		},
+		[cartItems]
+	);
+
+	// Check if item exists in cart
+	const isItemInCart = useCallback(
+		(productId) => {
+			return cartItems.some((item) => item.productId === productId);
+		},
+		[cartItems]
+	);
+
+	// Load cart when user changes
+	useEffect(() => {
+		loadCart();
+	}, [loadCart]);
 
 	return {
-		// Cart state
-		cartItems,
+		// State
+		items: cartItems,
+		loading,
+		error,
+		totalAmount,
 		totalItems,
-		subtotal,
-		deliveryCharge,
-		total,
-		syncStatus,
-		syncError,
-		lastSync,
-		isAuthenticated,
 
-		// Cart actions
-		addItemToCart,
-		updateItemQuantity,
-		removeItemFromCart,
-		clearCartItems,
+		// Actions
+		addItem,
+		addMultipleItems,
+		updateItem,
+		removeItem,
+		clearCart,
+		loadCart,
+		batchUpdate,
+		previewMergeItems,
 
-		// Utility functions
-		isInCart,
+		// Helpers
 		getItemQuantity,
-		proceedToCheckout,
+		isItemInCart,
+		calculateTotals,
 	};
 };
+
+export default useCart;
